@@ -30,17 +30,27 @@ import android.text.format.Time;
 import android.util.Log;
 
 import com.bumptech.glide.Glide;
+import com.example.android.sunshine.app.BuildConfig;
 import com.example.android.sunshine.app.MainActivity;
 import com.example.android.sunshine.app.R;
 import com.example.android.sunshine.app.Utility;
 import com.example.android.sunshine.app.data.WeatherContract;
 import com.example.android.sunshine.app.muzei.WeatherMuzeiSource;
+import com.google.android.gms.common.ConnectionResult;
+import com.google.android.gms.common.api.GoogleApiClient;
+import com.google.android.gms.common.api.ResultCallback;
+import com.google.android.gms.wearable.Asset;
+import com.google.android.gms.wearable.DataApi;
+import com.google.android.gms.wearable.PutDataMapRequest;
+import com.google.android.gms.wearable.PutDataRequest;
+import com.google.android.gms.wearable.Wearable;
 
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -52,7 +62,7 @@ import java.util.Vector;
 import java.util.concurrent.ExecutionException;
 
 public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
-    public final String LOG_TAG = SunshineSyncAdapter.class.getSimpleName();
+    public static final String LOG_TAG = SunshineSyncAdapter.class.getSimpleName();
     public static final String ACTION_DATA_UPDATED =
             "com.example.android.sunshine.app.ACTION_DATA_UPDATED";
     // Interval at which to sync with the weather, in seconds.
@@ -106,7 +116,7 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
         String format = "json";
         String units = "metric";
         int numDays = 14;
-        String apiKey = "Your open weather api key";
+        String apiKey = BuildConfig.WEATHER_API_KEY;
         try {
             // Construct the URL for the OpenWeatherMap query
             // Possible parameters are avaiable at OWM's forecast API page, at
@@ -341,12 +351,13 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
                 // delete old data so we don't build up an endless history
                 getContext().getContentResolver().delete(WeatherContract.WeatherEntry.CONTENT_URI,
                         WeatherContract.WeatherEntry.COLUMN_DATE + " <= ?",
-                        new String[] {Long.toString(dayTime.setJulianDay(julianStartDay-1))});
+                        new String[]{Long.toString(dayTime.setJulianDay(julianStartDay - 1))});
 
                 updateWidgets();
                 updateMuzei();
                 notifyWeather();
             }
+
             Log.d(LOG_TAG, "Sync Complete. " + cVVector.size() + " Inserted");
             setLocationStatus(getContext(), LOCATION_STATUS_OK);
 
@@ -478,6 +489,149 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
                     editor.commit();
                 }
                 cursor.close();
+            }
+        }
+        else{
+            String locationQuery = Utility.getPreferredLocation(context);
+
+            Uri weatherUri = WeatherContract.WeatherEntry.buildWeatherLocationWithDate(locationQuery, System.currentTimeMillis());
+
+            // we'll query our contentProvider, as always
+            Cursor cursor = context.getContentResolver().query(weatherUri, NOTIFY_WEATHER_PROJECTION, null, null, null);
+
+            if(cursor != null){
+                if (cursor.moveToFirst()) {
+                    int weatherId = cursor.getInt(INDEX_WEATHER_ID);
+                    double high = cursor.getDouble(INDEX_MAX_TEMP);
+                    double low = cursor.getDouble(INDEX_MIN_TEMP);
+
+                    int iconId = Utility.getIconResourceForWeatherCondition(weatherId);
+                    Resources resources = context.getResources();
+                    int artResourceId = Utility.getArtResourceForWeatherCondition(weatherId);
+                    String artUrl = Utility.getArtUrlForWeatherCondition(context, weatherId);
+
+                    // On Honeycomb and higher devices, we can retrieve the size of the large icon
+                    // Prior to that, we use a fixed size
+                    @SuppressLint("InlinedApi")
+                    int largeIconWidth = Build.VERSION.SDK_INT >= Build.VERSION_CODES.HONEYCOMB
+                            ? resources.getDimensionPixelSize(android.R.dimen.notification_large_icon_width)
+                            : resources.getDimensionPixelSize(R.dimen.notification_large_icon_default);
+                    @SuppressLint("InlinedApi")
+                    int largeIconHeight = Build.VERSION.SDK_INT >= Build.VERSION_CODES.HONEYCOMB
+                            ? resources.getDimensionPixelSize(android.R.dimen.notification_large_icon_height)
+                            : resources.getDimensionPixelSize(R.dimen.notification_large_icon_default);
+
+                    // Retrieve the large icon
+                    Bitmap largeIcon;
+                    try {
+                        largeIcon = Glide.with(context)
+                                .load(artUrl)
+                                .asBitmap()
+                                .error(artResourceId)
+                                .fitCenter()
+                                .into(largeIconWidth, largeIconHeight).get();
+                    } catch (InterruptedException | ExecutionException e) {
+                        Log.e(LOG_TAG, "Error retrieving large icon from " + artUrl, e);
+                        largeIcon = BitmapFactory.decodeResource(resources, artResourceId);
+                    }
+
+                    notifyWear(getContext(), largeIcon, weatherId, high, low);
+                }
+
+                cursor.close();
+            }
+        }
+    }
+
+    public static void notifyWear(Context context, Bitmap largeIcon, int weatherId, double high, double low) {
+
+        String WEATHER_PATH = "/weather";
+        String WEATHER_TEMP_HIGH_KEY = "weather_temp_high_key";
+        String WEATHER_TEMP_LOW_KEY = "weather_temp_low_key";
+        String WEATHER_TEMP_ICON_KEY = "weather_temp_icon_key";
+        int WEATHER_TEMP_ICON_RESIZE_WIDTH = 52;
+        int WEATHER_TEMP_ICON_RESIZE_HEIGHT = 52;
+
+        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
+        final int UNKNOWN_TEMP = -500;
+        double lastTempHigh = prefs.getFloat(WEATHER_TEMP_HIGH_KEY, UNKNOWN_TEMP);
+        double lastTempLow = prefs.getFloat(WEATHER_TEMP_LOW_KEY, UNKNOWN_TEMP);
+        int lastWeatherId = prefs.getInt(WEATHER_TEMP_ICON_KEY, UNKNOWN_TEMP);
+
+        if (lastTempHigh != UNKNOWN_TEMP && lastTempLow != UNKNOWN_TEMP && lastWeatherId != UNKNOWN_TEMP) {
+            if ((lastTempHigh == high && lastTempLow == low && lastWeatherId == weatherId))
+                return;// if it is the same data do nothing,ie don't send to the wearable
+        }
+
+        //save the new weather data
+        SharedPreferences.Editor editor = prefs.edit();
+        editor.putFloat(WEATHER_TEMP_HIGH_KEY, (float)high);
+        editor.putFloat(WEATHER_TEMP_LOW_KEY,(float) low);
+        editor.putInt(WEATHER_TEMP_ICON_KEY, weatherId);
+        editor.commit();
+
+        final GoogleApiClient mGoogleApiClient;
+
+
+        mGoogleApiClient = new GoogleApiClient.Builder(context)
+                .addApi(Wearable.API)
+                .addConnectionCallbacks(new GoogleApiClient.ConnectionCallbacks() {
+                    @Override
+                    public void onConnected(Bundle bundle) {
+                        Log.v(LOG_TAG, "Google API Client was connected");
+                    }
+
+                    @Override
+                    public void onConnectionSuspended(int i) {
+                        Log.v(LOG_TAG, "Connection to Google API client was suspended");
+                    }
+                })
+                .addOnConnectionFailedListener(new GoogleApiClient.OnConnectionFailedListener() {
+                    @Override
+                    public void onConnectionFailed(ConnectionResult result) {
+                        Log.e(LOG_TAG, "Connection to Google API client has failed");
+                    }
+                })
+                .build();
+
+        mGoogleApiClient.connect();
+
+        Asset asset = toAsset(Bitmap.createScaledBitmap(largeIcon, WEATHER_TEMP_ICON_RESIZE_WIDTH, WEATHER_TEMP_ICON_RESIZE_HEIGHT, true));
+
+        PutDataMapRequest putDataMapRequest = PutDataMapRequest.create(WEATHER_PATH);
+        putDataMapRequest.getDataMap().putString(WEATHER_TEMP_HIGH_KEY, Utility.formatTemperature(context, high));
+        putDataMapRequest.getDataMap().putString(WEATHER_TEMP_LOW_KEY, Utility.formatTemperature(context, low));
+        putDataMapRequest.getDataMap().putAsset(WEATHER_TEMP_ICON_KEY, asset);
+
+        PutDataRequest request = putDataMapRequest.asPutDataRequest();
+        Wearable.DataApi.putDataItem(mGoogleApiClient, request).setResultCallback(new ResultCallback<DataApi.DataItemResult>() {
+            @Override
+            public void onResult(DataApi.DataItemResult dataItemResult) {
+                if (dataItemResult.getStatus().isSuccess()) {
+                    Log.d(LOG_TAG, "Successfully send weather info");
+                } else {
+                    Log.e(LOG_TAG, "Failed to send weather info ");
+                }
+                // after send data we can disconnect
+                mGoogleApiClient.disconnect();
+            }
+        });
+
+    }
+
+    private static Asset toAsset(Bitmap bitmap) {
+        ByteArrayOutputStream byteStream = null;
+        try {
+            byteStream = new ByteArrayOutputStream();
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, byteStream);
+            return Asset.createFromBytes(byteStream.toByteArray());
+        } finally {
+            if (null != byteStream) {
+                try {
+                    byteStream.close();
+                } catch (IOException e) {
+                    // ignore
+                }
             }
         }
     }

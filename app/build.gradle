@@ -15,6 +15,14 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            buildConfigField "String", "GOOGLE_PROJECT_NUMBER", "\"PROJECT_NUMBER\""
+            buildConfigField "String", "WEATHER_API_KEY", "\"API_KEY\""
+        }
+        debug {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            buildConfigField "String", "GOOGLE_PROJECT_NUMBER", "\"PROJECT_NUMBER\""
+            buildConfigField "String", "WEATHER_API_KEY", "\"API_KEY\""
         }
     }
 }
@@ -29,5 +37,6 @@ dependencies {
     compile 'com.android.support:design:23.1.0'
     compile 'com.android.support:recyclerview-v7:23.1.0'
     compile 'com.google.android.gms:play-services-gcm:8.1.0'
+    compile 'com.google.android.gms:play-services-wearable:8.1.0'
     compile 'com.google.android.apps.muzei:muzei-api:2.0'
 }
